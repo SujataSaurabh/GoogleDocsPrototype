@@ -1,116 +1,94 @@
 """
-Collaborative Document Server
-------------------------------
-Like Google Docs — multiple clients edit the same document in real time.
+CollabDoc Web Server
+--------------------
+FastAPI + WebSockets backend.
+- Serves the frontend HTML at GET /
+- Handles WebSocket connections at ws://localhost:8000/ws/{username}
 
-How it works:
-1. Server holds the single source of truth (the document text)
-2. Each client connects via WebSocket
-3. When a client sends an edit, the server applies it and broadcasts to ALL clients
-4. Every client stays in sync automatically
+Install:
+    pip install fastapi uvicorn websockets
+
+Run:
+    uvicorn server:app --reload
+    then open http://localhost:8000
 """
 
-import asyncio
 import json
-import websockets
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from pathlib import Path
 
-# ── Shared state ─────────────────────────────────────────────────────────────
+app = FastAPI()
 
-document = {"content": "Welcome to CollabDoc! Start typing...\n"}
-connected_clients: dict[websockets.WebSocketServerProtocol, str] = {}  # socket → username
+# ── Shared state ──────────────────────────────────────────────────────────────
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def make_message(msg_type: str, **kwargs) -> str:
-    """Build a JSON message to send over the wire."""
-    return json.dumps({"type": msg_type, **kwargs})
+document = {"content": "Welcome to CollabDoc! Click here and start typing...\n"}
+connected: dict[str, WebSocket] = {}   # username → websocket
 
 
-async def broadcast(message: str, exclude=None):
-    """Send a message to every connected client (optionally skip one)."""
-    targets = [ws for ws in connected_clients if ws != exclude]
-    if targets:
-        await asyncio.gather(*[ws.send(message) for ws in targets])
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def msg(**kwargs) -> str:
+    return json.dumps(kwargs)
 
 
-async def broadcast_user_list():
-    """Tell everyone who is currently online."""
-    users = list(connected_clients.values())
-    await broadcast(make_message("user_list", users=users))
+async def broadcast(skip: str = None, **kwargs):
+    dead = []
+    for uname, ws in connected.items():
+        if uname == skip:
+            continue
+        try:
+            await ws.send_text(msg(**kwargs))
+        except Exception:
+            dead.append(uname)
+    for u in dead:
+        connected.pop(u, None)
 
 
-# ── Connection handler ────────────────────────────────────────────────────────
+async def broadcast_users():
+    await broadcast(type="user_list", users=list(connected.keys()))
 
-async def handle_client(websocket):
-    """
-    Lifecycle of one client connection:
-      CONNECT  → register, send current doc, announce arrival
-      MESSAGES → apply edits, broadcast to others
-      DISCONNECT → unregister, announce departure
-    """
-    username = None
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def index():
+    html = Path("index.html").read_text()
+    return HTMLResponse(html)
+
+
+@app.websocket("/ws/{username}")
+async def websocket_endpoint(websocket: WebSocket, username: str):
+    await websocket.accept()
+
+    # Handle duplicate usernames
+    if username in connected:
+        await websocket.send_text(msg(type="error", text=f"Username '{username}' is already taken."))
+        await websocket.close()
+        return
+
+    connected[username] = websocket
+    print(f"[+] {username} joined  (total: {len(connected)})")
+
+    # Send current doc state to newcomer
+    await websocket.send_text(msg(type="init", content=document["content"]))
+
+    # Tell everyone about updated user list + arrival
+    await broadcast_users()
+    await broadcast(skip=username, type="notification", text=f"{username} joined", kind="join")
+
     try:
-        # ── Handshake: first message must be {"type": "join", "username": "..."} ──
-        raw = await websocket.recv()
-        data = json.loads(raw)
-
-        if data.get("type") != "join" or not data.get("username"):
-            await websocket.send(make_message("error", text="First message must be a join with a username."))
-            return
-
-        username = data["username"].strip() or "Anonymous"
-        connected_clients[websocket] = username
-
-        print(f"[+] {username} joined  (total: {len(connected_clients)})")
-
-        # Send the current document to the newcomer
-        await websocket.send(make_message("init", content=document["content"]))
-
-        # Tell everyone (including the newcomer) about the updated user list
-        await broadcast_user_list()
-
-        # Announce the arrival to other clients
-        await broadcast(
-            make_message("notification", text=f"{username} joined the document"),
-            exclude=websocket,
-        )
-
-        # ── Main loop: handle edits ───────────────────────────────────────────
-        async for raw in websocket:
+        while True:
+            raw = await websocket.receive_text()
             data = json.loads(raw)
 
             if data.get("type") == "edit":
-                new_content = data.get("content", "")
-                document["content"] = new_content          # apply to shared state
-                print(f"[edit] {username}: {len(new_content)} chars")
+                document["content"] = data["content"]
+                print(f"[edit] {username}: {len(data['content'])} chars")
+                await broadcast(skip=username, type="edit", content=data["content"], author=username)
 
-                # Broadcast the change to everyone else
-                await broadcast(
-                    make_message("edit", content=new_content, author=username),
-                    exclude=websocket,
-                )
-
-    except websockets.exceptions.ConnectionClosedOK:
-        pass
-    except websockets.exceptions.ConnectionClosedError as e:
-        print(f"[!] Connection error for {username}: {e}")
-    finally:
-        if websocket in connected_clients:
-            del connected_clients[websocket]
-            print(f"[-] {username} left  (total: {len(connected_clients)})")
-            await broadcast_user_list()
-            await broadcast(make_message("notification", text=f"{username} left the document"))
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
-
-async def main():
-    print("CollabDoc server starting on ws://localhost:8765")
-    print("Open multiple terminal tabs and run: python client.py <YourName>")
-    async with websockets.serve(handle_client, "localhost", 8765):
-        await asyncio.Future()   # run forever
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    except WebSocketDisconnect:
+        connected.pop(username, None)
+        print(f"[-] {username} left  (total: {len(connected)})")
+        await broadcast_users()
+        await broadcast(skip=username, type="notification", text=f"{username} left", kind="leave")
