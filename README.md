@@ -4,9 +4,9 @@ A minimal Python implementation of how Google Docs-style real-time collaboration
 
 ## Quick Start
 
-### 1. Install dependency
+### 1. Install dependencies
 ```bash
-pip install websockets
+pip install -r requirements.txt
 ```
 
 ### 2. Start the server (one terminal)
