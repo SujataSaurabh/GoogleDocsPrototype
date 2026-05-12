@@ -9,18 +9,17 @@ A minimal Python implementation of how Google Docs-style real-time collaboration
 pip install -r requirements.txt
 ```
 
-### 2. Start the server (one terminal)
-```bash
-python server.py
+### 2. Type in terminal
+```
+uvicorn server:app --reload
 ```
 
-### 3. Connect clients (open two or more terminals)
-```bash
-python client.py Alice
-python client.py Bob
+### 3. Connect clients (open locahost in two or more browsers)
+``` 
+ http://localhost:8000 
 ```
 
-Type in either terminal and watch the change appear in the other one!
+Type in either browser and watch the change appear in the other one!
 
 ---
 
